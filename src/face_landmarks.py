@@ -3,6 +3,7 @@ import time
 
 import cv2
 import mediapipe as mp
+import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -14,6 +15,10 @@ PREFERRED_CAMERA_HEIGHT = 720
 EYE_CLOSED_EAR_THRESHOLD = 0.20
 DROWSINESS_SECONDS_THRESHOLD = 2.0
 YAWN_MAR_THRESHOLD = 0.60
+HEAD_DOWN_PITCH_THRESHOLD = 15.0
+HEAD_UP_PITCH_THRESHOLD = -15.0
+SIDE_LOOK_YAW_THRESHOLD = 25.0
+HEAD_TILT_ROLL_THRESHOLD = 20.0
 
 LEFT_EYE_POINTS = [33, 133, 160, 159, 158, 144, 145, 153]
 RIGHT_EYE_POINTS = [362, 263, 387, 386, 385, 373, 374, 380]
@@ -21,7 +26,18 @@ LEFT_EAR_POINTS = [33, 160, 158, 133, 153, 144]
 RIGHT_EAR_POINTS = [362, 385, 387, 263, 373, 380]
 MOUTH_POINTS = [61, 291, 13, 14, 78, 308, 82, 312, 87, 317]
 MOUTH_MAR_POINTS = [61, 81, 13, 291, 311, 14]
-HEAD_POSE_POINTS = [1, 10, 152]
+HEAD_POSE_POINTS = [1, 152, 33, 263, 61, 291]
+HEAD_POSE_MODEL_POINTS = np.array(
+    [
+        (0.0, 0.0, 0.0),  # Nose tip
+        (0.0, -63.6, -12.5),  # Chin
+        (-43.3, 32.7, -26.0),  # Left eye outer corner
+        (43.3, 32.7, -26.0),  # Right eye outer corner
+        (-28.9, -28.9, -24.1),  # Left mouth corner
+        (28.9, -28.9, -24.1),  # Right mouth corner
+    ],
+    dtype=np.float64,
+)
 
 
 def open_camera():
@@ -120,6 +136,80 @@ def get_mouth_status(mar):
     return "Mouth normal", (0, 255, 0)
 
 
+def estimate_head_pose(frame, landmarks):
+    height, width, _ = frame.shape
+    image_points = np.array(
+        [get_pixel_point(frame, landmarks[index]) for index in HEAD_POSE_POINTS],
+        dtype=np.float64,
+    )
+
+    focal_length = width
+    center = (width / 2, height / 2)
+    camera_matrix = np.array(
+        [
+            [focal_length, 0, center[0]],
+            [0, focal_length, center[1]],
+            [0, 0, 1],
+        ],
+        dtype=np.float64,
+    )
+    distortion_coefficients = np.zeros((4, 1), dtype=np.float64)
+
+    success, rotation_vector, translation_vector = cv2.solvePnP(
+        HEAD_POSE_MODEL_POINTS,
+        image_points,
+        camera_matrix,
+        distortion_coefficients,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+
+    if not success:
+        return None
+
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+    projection_matrix = np.hstack((rotation_matrix, translation_vector))
+    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(projection_matrix)
+
+    pitch, yaw, roll = euler_angles.flatten()
+
+    pitch = normalize_angle(float(pitch))
+    yaw = normalize_angle(float(yaw))
+    roll = normalize_angle(float(roll))
+
+    return pitch, yaw, roll
+
+
+def normalize_angle(angle):
+    if angle > 90:
+        return angle - 180
+
+    if angle < -90:
+        return angle + 180
+
+    return angle
+
+
+def get_head_status(head_pose):
+    if head_pose is None:
+        return "Head pose unavailable", (0, 0, 255)
+
+    pitch, yaw, roll = head_pose
+
+    if abs(yaw) > SIDE_LOOK_YAW_THRESHOLD:
+        return "Looking sideways", (0, 165, 255)
+
+    if pitch > HEAD_DOWN_PITCH_THRESHOLD:
+        return "Head down", (0, 0, 255)
+
+    if pitch < HEAD_UP_PITCH_THRESHOLD:
+        return "Head up", (0, 165, 255)
+
+    if abs(roll) > HEAD_TILT_ROLL_THRESHOLD:
+        return "Head tilted", (0, 165, 255)
+
+    return "Head normal", (0, 255, 0)
+
+
 def create_face_landmarker():
     base_options = python.BaseOptions(model_asset_path=str(MODEL_PATH))
     options = vision.FaceLandmarkerOptions(
@@ -184,6 +274,8 @@ def main():
             )
             mar = calculate_mar(frame, face_landmarks, MOUTH_MAR_POINTS)
             mouth_status, mouth_status_color = get_mouth_status(mar)
+            head_pose = estimate_head_pose(frame, face_landmarks)
+            head_status, head_status_color = get_head_status(head_pose)
 
             status_text = "Face detected"
             status_color = (0, 255, 0)
@@ -225,6 +317,28 @@ def main():
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 mouth_status_color,
+                2,
+                cv2.LINE_AA,
+            )
+            if head_pose is not None:
+                pitch, yaw, roll = head_pose
+                cv2.putText(
+                    frame,
+                    f"Pitch: {pitch:.1f}  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
+                    (20, 210),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+            cv2.putText(
+                frame,
+                head_status,
+                (20, 245),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                head_status_color,
                 2,
                 cv2.LINE_AA,
             )
