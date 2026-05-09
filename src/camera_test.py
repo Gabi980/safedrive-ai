@@ -1,14 +1,33 @@
 import cv2
 
 
+CAMERA_INDEX = 0
+PREFERRED_CAMERA_WIDTH = 1280
+PREFERRED_CAMERA_HEIGHT = 720
+
+
+def open_camera():
+    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, PREFERRED_CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, PREFERRED_CAMERA_HEIGHT)
+    return cap
+
+
+def print_camera_resolution(cap):
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Camera resolution: {actual_width}x{actual_height}")
+
+
 def main():
-    camera_index = 0
-    cap = cv2.VideoCapture(camera_index)
+    cap = open_camera()
 
     if not cap.isOpened():
         print("Camera unavailable.")
         return
 
+    print_camera_resolution(cap)
     print("Camera started. Press Q or Esc to exit.")
 
     while True:
