@@ -1,43 +1,44 @@
-from pathlib import Path
+from collections import deque
 import time
 
 import cv2
 import mediapipe as mp
-import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-
-MODEL_PATH = Path("models/face_landmarker.task")
-CAMERA_INDEX = 0
-PREFERRED_CAMERA_WIDTH = 1280
-PREFERRED_CAMERA_HEIGHT = 720
-EYE_CLOSED_EAR_THRESHOLD = 0.20
-DROWSINESS_SECONDS_THRESHOLD = 2.0
-YAWN_MAR_THRESHOLD = 0.60
-HEAD_DOWN_PITCH_THRESHOLD = 15.0
-HEAD_UP_PITCH_THRESHOLD = -15.0
-SIDE_LOOK_YAW_THRESHOLD = 25.0
-HEAD_TILT_ROLL_THRESHOLD = 20.0
-
-LEFT_EYE_POINTS = [33, 133, 160, 159, 158, 144, 145, 153]
-RIGHT_EYE_POINTS = [362, 263, 387, 386, 385, 373, 374, 380]
-LEFT_EAR_POINTS = [33, 160, 158, 133, 153, 144]
-RIGHT_EAR_POINTS = [362, 385, 387, 263, 373, 380]
-MOUTH_POINTS = [61, 291, 13, 14, 78, 308, 82, 312, 87, 317]
-MOUTH_MAR_POINTS = [61, 81, 13, 291, 311, 14]
-HEAD_POSE_POINTS = [1, 152, 33, 263, 61, 291]
-HEAD_POSE_MODEL_POINTS = np.array(
-    [
-        (0.0, 0.0, 0.0),  # Nose tip
-        (0.0, -63.6, -12.5),  # Chin
-        (-43.3, 32.7, -26.0),  # Left eye outer corner
-        (43.3, 32.7, -26.0),  # Right eye outer corner
-        (-28.9, -28.9, -24.1),  # Left mouth corner
-        (28.9, -28.9, -24.1),  # Right mouth corner
-    ],
-    dtype=np.float64,
+from alert_system import (
+    calculate_drowsiness_score,
+    get_alert_level,
+    get_rule_based_driver_status,
+    play_alert_sound,
 )
+from config import (
+    ADAPTIVE_EAR_MIN_SAMPLES,
+    ADAPTIVE_EAR_PERCENTILE,
+    ADAPTIVE_EAR_RATIO,
+    ADAPTIVE_EAR_UPDATE_RATE,
+    ADAPTIVE_EAR_WINDOW,
+    CAMERA_INDEX,
+    EYE_CLOSED_EAR_THRESHOLD,
+    EAR_SMOOTHING_WINDOW,
+    MODEL_PATH,
+    PREFERRED_CAMERA_HEIGHT,
+    PREFERRED_CAMERA_WIDTH,
+    TELEMETRY_SAMPLE_SECONDS,
+    YAWN_MAR_THRESHOLD,
+)
+from facial_features import calculate_ear, calculate_mar, get_eye_status, get_mouth_status
+from head_pose import estimate_head_pose, get_head_status
+from landmark_indexes import (
+    HEAD_POSE_POINTS,
+    LEFT_EAR_POINTS,
+    LEFT_EYE_POINTS,
+    MOUTH_MAR_POINTS,
+    MOUTH_POINTS,
+    RIGHT_EAR_POINTS,
+    RIGHT_EYE_POINTS,
+)
+from telemetry_store import reset_telemetry, update_telemetry
 
 
 def open_camera():
@@ -54,162 +55,6 @@ def print_camera_resolution(cap):
     print(f"Camera resolution: {actual_width}x{actual_height}")
 
 
-def draw_landmark_points(frame, landmarks, point_indexes, color, radius=3):
-    height, width, _ = frame.shape
-
-    for index in point_indexes:
-        landmark = landmarks[index]
-        x = int(landmark.x * width)
-        y = int(landmark.y * height)
-        cv2.circle(frame, (x, y), radius, color, -1)
-
-
-def draw_all_landmarks(frame, landmarks):
-    height, width, _ = frame.shape
-
-    for landmark in landmarks:
-        x = int(landmark.x * width)
-        y = int(landmark.y * height)
-        cv2.circle(frame, (x, y), 1, (180, 180, 180), -1)
-
-
-def get_pixel_point(frame, landmark):
-    height, width, _ = frame.shape
-    return int(landmark.x * width), int(landmark.y * height)
-
-
-def euclidean_distance(point_a, point_b):
-    x1, y1 = point_a
-    x2, y2 = point_b
-    return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-
-
-def calculate_ear(frame, landmarks, eye_points):
-    p1, p2, p3, p4, p5, p6 = [
-        get_pixel_point(frame, landmarks[index]) for index in eye_points
-    ]
-
-    vertical_distance_1 = euclidean_distance(p2, p6)
-    vertical_distance_2 = euclidean_distance(p3, p5)
-    horizontal_distance = euclidean_distance(p1, p4)
-
-    if horizontal_distance == 0:
-        return 0.0
-
-    return (vertical_distance_1 + vertical_distance_2) / (2.0 * horizontal_distance)
-
-
-def calculate_mar(frame, landmarks, mouth_points):
-    p1, p2, p3, p4, p5, p6 = [
-        get_pixel_point(frame, landmarks[index]) for index in mouth_points
-    ]
-
-    vertical_distance_1 = euclidean_distance(p2, p6)
-    vertical_distance_2 = euclidean_distance(p3, p5)
-    horizontal_distance = euclidean_distance(p1, p4)
-
-    if horizontal_distance == 0:
-        return 0.0
-
-    return (vertical_distance_1 + vertical_distance_2) / (2.0 * horizontal_distance)
-
-
-def get_eye_status(average_ear, closed_start_time):
-    if average_ear >= EYE_CLOSED_EAR_THRESHOLD:
-        return "Eyes open", (0, 255, 0), None
-
-    if closed_start_time is None:
-        closed_start_time = time.time()
-
-    closed_seconds = time.time() - closed_start_time
-
-    if closed_seconds >= DROWSINESS_SECONDS_THRESHOLD:
-        return "Drowsiness warning", (0, 0, 255), closed_start_time
-
-    return "Eyes closed", (0, 165, 255), closed_start_time
-
-
-def get_mouth_status(mar):
-    if mar >= YAWN_MAR_THRESHOLD:
-        return "Yawning detected", (0, 0, 255)
-
-    return "Mouth normal", (0, 255, 0)
-
-
-def estimate_head_pose(frame, landmarks):
-    height, width, _ = frame.shape
-    image_points = np.array(
-        [get_pixel_point(frame, landmarks[index]) for index in HEAD_POSE_POINTS],
-        dtype=np.float64,
-    )
-
-    focal_length = width
-    center = (width / 2, height / 2)
-    camera_matrix = np.array(
-        [
-            [focal_length, 0, center[0]],
-            [0, focal_length, center[1]],
-            [0, 0, 1],
-        ],
-        dtype=np.float64,
-    )
-    distortion_coefficients = np.zeros((4, 1), dtype=np.float64)
-
-    success, rotation_vector, translation_vector = cv2.solvePnP(
-        HEAD_POSE_MODEL_POINTS,
-        image_points,
-        camera_matrix,
-        distortion_coefficients,
-        flags=cv2.SOLVEPNP_ITERATIVE,
-    )
-
-    if not success:
-        return None
-
-    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-    projection_matrix = np.hstack((rotation_matrix, translation_vector))
-    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(projection_matrix)
-
-    pitch, yaw, roll = euler_angles.flatten()
-
-    pitch = normalize_angle(float(pitch))
-    yaw = normalize_angle(float(yaw))
-    roll = normalize_angle(float(roll))
-
-    return pitch, yaw, roll
-
-
-def normalize_angle(angle):
-    if angle > 90:
-        return angle - 180
-
-    if angle < -90:
-        return angle + 180
-
-    return angle
-
-
-def get_head_status(head_pose):
-    if head_pose is None:
-        return "Head pose unavailable", (0, 0, 255)
-
-    pitch, yaw, roll = head_pose
-
-    if abs(yaw) > SIDE_LOOK_YAW_THRESHOLD:
-        return "Looking sideways", (0, 165, 255)
-
-    if pitch > HEAD_DOWN_PITCH_THRESHOLD:
-        return "Head down", (0, 0, 255)
-
-    if pitch < HEAD_UP_PITCH_THRESHOLD:
-        return "Head up", (0, 165, 255)
-
-    if abs(roll) > HEAD_TILT_ROLL_THRESHOLD:
-        return "Head tilted", (0, 165, 255)
-
-    return "Head normal", (0, 255, 0)
-
-
 def create_face_landmarker():
     base_options = python.BaseOptions(model_asset_path=str(MODEL_PATH))
     options = vision.FaceLandmarkerOptions(
@@ -221,6 +66,228 @@ def create_face_landmarker():
         min_tracking_confidence=0.5,
     )
     return vision.FaceLandmarker.create_from_options(options)
+
+
+def draw_landmark_points(frame, landmarks, point_indexes, color, radius=3):
+    height, width, _ = frame.shape
+
+    for index in point_indexes:
+        landmark = landmarks[index]
+        x = int(landmark.x * width)
+        y = int(landmark.y * height)
+        cv2.circle(frame, (x, y), radius, color, -1)
+
+
+def draw_text(frame, text, position, color, scale=0.8, thickness=2):
+    cv2.putText(
+        frame,
+        text,
+        position,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def draw_feature_points(frame, face_landmarks):
+    draw_landmark_points(frame, face_landmarks, LEFT_EYE_POINTS, (0, 255, 0))
+    draw_landmark_points(frame, face_landmarks, RIGHT_EYE_POINTS, (0, 255, 0))
+    draw_landmark_points(frame, face_landmarks, MOUTH_POINTS, (255, 0, 255))
+    draw_landmark_points(frame, face_landmarks, HEAD_POSE_POINTS, (0, 255, 255), radius=4)
+
+
+def draw_metrics(
+    frame,
+    average_ear,
+    eye_status,
+    eye_status_color,
+    mar,
+    mouth_status,
+    mouth_status_color,
+    head_pose,
+    head_status,
+    head_status_color,
+    driver_status,
+    driver_status_color,
+    warning_signs,
+    drowsiness_score,
+    alert_text,
+    alert_color,
+):
+    draw_text(frame, f"EAR: {average_ear:.2f}", (20, 70), (255, 255, 255))
+    draw_text(frame, eye_status, (20, 105), eye_status_color)
+    draw_text(frame, f"MAR: {mar:.2f}", (20, 140), (255, 255, 255))
+    draw_text(frame, mouth_status, (20, 175), mouth_status_color)
+
+    if head_pose is not None:
+        pitch, yaw, roll = head_pose
+        draw_text(
+            frame,
+            f"Pitch: {pitch:.1f}  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
+            (20, 210),
+            (255, 255, 255),
+            scale=0.7,
+        )
+
+    draw_text(frame, head_status, (20, 245), head_status_color)
+    draw_text(frame, driver_status, (20, 290), driver_status_color, scale=1.0, thickness=3)
+    draw_text(frame, f"Signs: {len(warning_signs)}", (20, 325), driver_status_color)
+    draw_text(frame, f"Score: {drowsiness_score}/100", (20, 370), alert_color, scale=0.9)
+    draw_text(frame, alert_text, (20, 410), alert_color, scale=0.9)
+
+
+def calculate_average_ear(frame, face_landmarks):
+    left_ear = calculate_ear(frame, face_landmarks, LEFT_EAR_POINTS)
+    right_ear = calculate_ear(frame, face_landmarks, RIGHT_EAR_POINTS)
+    return (left_ear + right_ear) / 2.0
+
+
+def get_smoothed_ear(raw_ear, ear_history):
+    ear_history.append(raw_ear)
+    return sum(ear_history) / len(ear_history)
+
+
+def percentile(values, percentile_value):
+    if not values:
+        return None
+
+    sorted_values = sorted(values)
+    index = round((len(sorted_values) - 1) * percentile_value)
+    return sorted_values[index]
+
+
+def update_adaptive_ear_threshold(raw_ear, adaptive_ear_history, current_threshold):
+    adaptive_ear_history.append(raw_ear)
+
+    if len(adaptive_ear_history) < ADAPTIVE_EAR_MIN_SAMPLES:
+        return current_threshold, None
+
+    open_eye_reference = percentile(
+        list(adaptive_ear_history),
+        ADAPTIVE_EAR_PERCENTILE,
+    )
+    target_threshold = open_eye_reference * ADAPTIVE_EAR_RATIO
+    updated_threshold = (
+        current_threshold * (1.0 - ADAPTIVE_EAR_UPDATE_RATE)
+        + target_threshold * ADAPTIVE_EAR_UPDATE_RATE
+    )
+
+    return updated_threshold, open_eye_reference
+
+
+def should_update_adaptive_threshold(eye_status, mouth_status, head_status):
+    return (
+        eye_status == "Eyes open"
+        and mouth_status == "Mouth normal"
+        and head_status == "Head normal"
+    )
+
+
+def process_face(
+    frame,
+    face_landmarks,
+    closed_start_time,
+    last_sound_time,
+    ear_history,
+    adaptive_ear_history,
+    ear_threshold,
+    session_start_time,
+    last_telemetry_sample_time,
+):
+    draw_feature_points(frame, face_landmarks)
+
+    raw_ear = calculate_average_ear(frame, face_landmarks)
+    average_ear = get_smoothed_ear(raw_ear, ear_history)
+    eye_status, eye_status_color, closed_start_time = get_eye_status(
+        average_ear,
+        closed_start_time,
+        ear_threshold,
+    )
+
+    mar = calculate_mar(frame, face_landmarks, MOUTH_MAR_POINTS)
+    mouth_status, mouth_status_color = get_mouth_status(mar)
+
+    head_pose = estimate_head_pose(frame, face_landmarks)
+    head_status, head_status_color = get_head_status(head_pose)
+
+    open_eye_reference = None
+    if should_update_adaptive_threshold(eye_status, mouth_status, head_status):
+        ear_threshold, open_eye_reference = update_adaptive_ear_threshold(
+            raw_ear,
+            adaptive_ear_history,
+            ear_threshold,
+        )
+
+    driver_status, driver_status_color, warning_signs = get_rule_based_driver_status(
+        eye_status,
+        mouth_status,
+        head_status,
+    )
+    drowsiness_score = calculate_drowsiness_score(eye_status, mouth_status, head_status)
+    alert_text, alert_color, alert_level = get_alert_level(drowsiness_score)
+    last_sound_time = play_alert_sound(alert_level, last_sound_time)
+
+    draw_metrics(
+        frame,
+        average_ear,
+        eye_status,
+        eye_status_color,
+        mar,
+        mouth_status,
+        mouth_status_color,
+        head_pose,
+        head_status,
+        head_status_color,
+        driver_status,
+        driver_status_color,
+        warning_signs,
+        drowsiness_score,
+        alert_text,
+        alert_color,
+    )
+    draw_text(frame, f"EAR threshold: {ear_threshold:.2f}", (20, 450), (255, 255, 255), scale=0.7)
+    if open_eye_reference is not None:
+        draw_text(
+            frame,
+            f"Open-eye ref: {open_eye_reference:.2f}",
+            (20, 480),
+            (255, 255, 255),
+            scale=0.7,
+        )
+
+    pitch, yaw, roll = head_pose if head_pose is not None else (None, None, None)
+    elapsed = time.time() - session_start_time
+    should_sample = elapsed - last_telemetry_sample_time >= TELEMETRY_SAMPLE_SECONDS
+    if should_sample:
+        last_telemetry_sample_time = elapsed
+
+    update_telemetry(
+        {
+            "time": elapsed,
+            "face_detected": True,
+            "ear": average_ear,
+            "raw_ear": raw_ear,
+            "open_eye_reference": open_eye_reference,
+            "ear_threshold": ear_threshold,
+            "mar": mar,
+            "mar_threshold": YAWN_MAR_THRESHOLD,
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll": roll,
+            "score": drowsiness_score,
+            "alert_level": alert_level,
+            "warning_signs": len(warning_signs),
+            "driver_status": driver_status,
+            "eye_status": eye_status,
+            "mouth_status": mouth_status,
+            "head_status": head_status,
+        },
+        should_sample,
+    )
+
+    return closed_start_time, last_sound_time, ear_threshold, last_telemetry_sample_time
 
 
 def main():
@@ -236,8 +303,16 @@ def main():
 
     print_camera_resolution(cap)
     landmarker = create_face_landmarker()
-    print("Face Mesh started. Press Q or Esc to exit.")
+    print("SafeDrive AI started. Press Q or Esc to exit.")
+    reset_telemetry()
+
     closed_start_time = None
+    last_sound_time = 0.0
+    ear_history = deque(maxlen=EAR_SMOOTHING_WINDOW)
+    adaptive_ear_history = deque(maxlen=ADAPTIVE_EAR_WINDOW)
+    ear_threshold = EYE_CLOSED_EAR_THRESHOLD
+    session_start_time = time.time()
+    last_telemetry_sample_time = 0.0
 
     while True:
         success, frame = cap.read()
@@ -248,115 +323,62 @@ def main():
 
         frame = cv2.flip(frame, 1)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        timestamp_ms = int(time.time() * 1000)
-        result = landmarker.detect_for_video(mp_image, timestamp_ms)
+        result = landmarker.detect_for_video(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame),
+            int(time.time() * 1000),
+        )
 
         if result.face_landmarks:
+            draw_text(frame, "Face detected", (20, 35), (0, 255, 0))
             face_landmarks = result.face_landmarks[0]
 
-            # draw_all_landmarks(frame, face_landmarks)
-            draw_landmark_points(frame, face_landmarks,
-                                 LEFT_EYE_POINTS, (0, 255, 0))
-            draw_landmark_points(frame, face_landmarks,
-                                 RIGHT_EYE_POINTS, (0, 255, 0))
-            draw_landmark_points(frame, face_landmarks,
-                                 MOUTH_POINTS, (255, 0, 255))
-            draw_landmark_points(frame, face_landmarks,
-                                 HEAD_POSE_POINTS, (0, 255, 255), radius=4)
-
-            left_ear = calculate_ear(frame, face_landmarks, LEFT_EAR_POINTS)
-            right_ear = calculate_ear(frame, face_landmarks, RIGHT_EAR_POINTS)
-            average_ear = (left_ear + right_ear) / 2.0
-            eye_status, eye_status_color, closed_start_time = get_eye_status(
-                average_ear,
+            (
                 closed_start_time,
-            )
-            mar = calculate_mar(frame, face_landmarks, MOUTH_MAR_POINTS)
-            mouth_status, mouth_status_color = get_mouth_status(mar)
-            head_pose = estimate_head_pose(frame, face_landmarks)
-            head_status, head_status_color = get_head_status(head_pose)
-
-            status_text = "Face detected"
-            status_color = (0, 255, 0)
-
-            cv2.putText(
+                last_sound_time,
+                ear_threshold,
+                last_telemetry_sample_time,
+            ) = process_face(
                 frame,
-                f"EAR: {average_ear:.2f}",
-                (20, 70),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                eye_status,
-                (20, 105),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                eye_status_color,
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                f"MAR: {mar:.2f}",
-                (20, 140),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                mouth_status,
-                (20, 175),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                mouth_status_color,
-                2,
-                cv2.LINE_AA,
-            )
-            if head_pose is not None:
-                pitch, yaw, roll = head_pose
-                cv2.putText(
-                    frame,
-                    f"Pitch: {pitch:.1f}  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
-                    (20, 210),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-            cv2.putText(
-                frame,
-                head_status,
-                (20, 245),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                head_status_color,
-                2,
-                cv2.LINE_AA,
+                face_landmarks,
+                closed_start_time,
+                last_sound_time,
+                ear_history,
+                adaptive_ear_history,
+                ear_threshold,
+                session_start_time,
+                last_telemetry_sample_time,
             )
         else:
-            status_text = "No face detected"
-            status_color = (0, 0, 255)
+            draw_text(frame, "No face detected", (20, 35), (0, 0, 255))
             closed_start_time = None
+            elapsed = time.time() - session_start_time
+            should_sample = elapsed - last_telemetry_sample_time >= TELEMETRY_SAMPLE_SECONDS
+            if should_sample:
+                last_telemetry_sample_time = elapsed
 
-        cv2.putText(
-            frame,
-            status_text,
-            (20, 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            status_color,
-            2,
-            cv2.LINE_AA,
-        )
+            update_telemetry(
+                {
+                    "time": elapsed,
+                    "face_detected": False,
+                    "ear": None,
+                    "raw_ear": None,
+                    "open_eye_reference": None,
+                    "ear_threshold": ear_threshold,
+                    "mar": None,
+                    "mar_threshold": YAWN_MAR_THRESHOLD,
+                    "pitch": None,
+                    "yaw": None,
+                    "roll": None,
+                    "score": 0,
+                    "alert_level": 0,
+                    "warning_signs": 0,
+                    "driver_status": "No face detected",
+                    "eye_status": "Unavailable",
+                    "mouth_status": "Unavailable",
+                    "head_status": "Unavailable",
+                },
+                should_sample,
+            )
 
         cv2.imshow("SafeDrive AI - Face Mesh", frame)
 
