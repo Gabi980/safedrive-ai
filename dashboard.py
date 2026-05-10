@@ -14,6 +14,7 @@ from config import (  # noqa: E402
     HEAD_DOWN_PITCH_THRESHOLD,
     HEAD_TILT_ROLL_THRESHOLD,
     HEAD_UP_PITCH_THRESHOLD,
+    ML_DROWSY_PROBABILITY_THRESHOLD,
     SIDE_LOOK_YAW_THRESHOLD,
     TELEMETRY_SAMPLE_SECONDS,
     YAWN_MAR_THRESHOLD,
@@ -35,8 +36,19 @@ def safe_float_text(value, digits=2):
     return f"{float(value):.{digits}f}"
 
 
+def safe_percent_text(value, digits=0):
+    if value is None or pd.isna(value):
+        return "-"
+
+    return f"{float(value) * 100:.{digits}f}%"
+
+
 def make_line_chart(df, value_columns, title, y_title, rules=None, height=250):
     if df.empty:
+        return alt.Chart(pd.DataFrame({"time": [], "metric": [], "value": []})).mark_line()
+
+    value_columns = [column for column in value_columns if column in df.columns]
+    if not value_columns:
         return alt.Chart(pd.DataFrame({"time": [], "metric": [], "value": []})).mark_line()
 
     chart_data = df.melt(
@@ -106,6 +118,12 @@ def render_metric_cards(record):
     c7.metric("Mouth status", record.get("mouth_status", "-"))
     c8.metric("Head status", record.get("head_status", "-"))
 
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("ML decision", record.get("ml_prediction", "-"))
+    c10.metric("Live drowsy probability", safe_percent_text(record.get("ml_drowsy_probability")))
+    c11.metric("Raw model drowsy", safe_percent_text(record.get("ml_raw_drowsy_probability")))
+    c12.metric("Live alert probability", safe_percent_text(record.get("ml_alert_probability")))
+
 
 def render_status(record):
     st.subheader("Current Status")
@@ -120,6 +138,11 @@ def render_status(record):
             "face_detected": bool(record.get("face_detected", False)),
             "warning_signs": safe_int(record.get("warning_signs")),
             "sample_time": safe_float_text(record.get("time"), digits=1),
+            "ml_prediction": record.get("ml_prediction", "-"),
+            "ml_live_drowsy_probability": safe_percent_text(record.get("ml_drowsy_probability")),
+            "ml_raw_drowsy_probability": safe_percent_text(record.get("ml_raw_drowsy_probability")),
+            "ml_live_evidence": safe_percent_text(record.get("ml_live_evidence")),
+            "rule_vs_ml": f"{record.get('driver_status', '-')} vs {record.get('ml_prediction', '-')}",
         }
     )
 
@@ -186,6 +209,22 @@ def render_charts(df):
             ),
             use_container_width=True,
         )
+        st.altair_chart(
+            make_line_chart(
+                df,
+                ["ml_drowsy_probability", "ml_raw_drowsy_probability"],
+                "ML Drowsy Probability: Live Calibrated vs Raw Model",
+                "Probability",
+                rules=[
+                    {
+                        "value": ML_DROWSY_PROBABILITY_THRESHOLD,
+                        "label": "Live drowsy threshold",
+                        "color": "#38bdf8",
+                    }
+                ],
+            ),
+            use_container_width=True,
+        )
 
 
 def render_recent_telemetry(df):
@@ -204,11 +243,18 @@ def render_recent_telemetry(df):
         "yaw",
         "roll",
         "score",
+        "ml_prediction",
+        "ml_drowsy_probability",
+        "ml_raw_drowsy_probability",
+        "ml_alert_probability",
+        "ml_live_evidence",
+        "ml_drowsy_threshold",
         "driver_status",
         "eye_status",
         "mouth_status",
         "head_status",
     ]
+    visible_columns = [column for column in visible_columns if column in df.columns]
     st.dataframe(df[visible_columns].tail(15), use_container_width=True, hide_index=True)
 
 

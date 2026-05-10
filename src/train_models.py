@@ -25,19 +25,23 @@ from xgboost import XGBClassifier
 
 
 BASE_FEATURE_COLUMNS = ["ear", "mar", "pitch", "yaw", "roll"]
+FACIAL_FEATURE_COLUMNS = ["ear", "mar"]
+SIGNAL_FEATURE_COLUMNS = ["eye_closed_signal", "yawn_signal", "head_abnormal_signal"]
 RULE_FEATURE_COLUMNS = ["score", "alert_level"]
 TARGET_COLUMN = "label"
 LABEL_NAMES = ["alert", "drowsy"]
 
 
-def load_dataset(csv_path, include_rule_features=False):
-    df = pd.read_csv(csv_path)
-    feature_columns = BASE_FEATURE_COLUMNS.copy()
+def load_dataset(csv_path, include_rule_features=False, feature_set="all"):
+    df = pd.read_csv(csv_path, low_memory=False)
+    feature_columns = get_feature_columns(include_rule_features, feature_set)
 
-    if include_rule_features:
-        feature_columns.extend(RULE_FEATURE_COLUMNS)
+    required_columns = feature_columns + [TARGET_COLUMN]
+    if feature_set == "signals":
+        required_columns.append("usable_for_training")
+    else:
+        required_columns.append("face_detected")
 
-    required_columns = feature_columns + [TARGET_COLUMN, "face_detected"]
     missing_columns = [
         column for column in required_columns if column not in df.columns]
 
@@ -45,7 +49,11 @@ def load_dataset(csv_path, include_rule_features=False):
         raise ValueError(f"Missing columns in {csv_path}: {missing_columns}")
 
     before_rows = len(df)
-    df = df[df["face_detected"] == True].copy()  # noqa: E712
+    if feature_set == "signals":
+        df = df[to_bool(df["usable_for_training"])].copy()
+    else:
+        df = df[to_bool(df["face_detected"])].copy()
+
     df = df.dropna(subset=feature_columns + [TARGET_COLUMN])
     df[TARGET_COLUMN] = df[TARGET_COLUMN].astype(int)
 
@@ -56,6 +64,26 @@ def load_dataset(csv_path, include_rule_features=False):
     print(df[TARGET_COLUMN].value_counts().sort_index().to_string())
 
     return df, feature_columns
+
+
+def to_bool(series):
+    return series.astype(str).str.lower().isin({"true", "1", "yes"})
+
+
+def get_feature_columns(include_rule_features=False, feature_set="all"):
+    if feature_set == "facial":
+        feature_columns = FACIAL_FEATURE_COLUMNS.copy()
+    elif feature_set == "signals":
+        feature_columns = SIGNAL_FEATURE_COLUMNS.copy()
+    elif feature_set == "all":
+        feature_columns = BASE_FEATURE_COLUMNS.copy()
+    else:
+        raise ValueError(f"Unknown feature set: {feature_set}")
+
+    if include_rule_features:
+        feature_columns.extend(RULE_FEATURE_COLUMNS)
+
+    return feature_columns
 
 
 def split_dataset(df, feature_columns, test_size, random_state):
@@ -361,12 +389,22 @@ def parse_args():
         action="store_true",
         help="Include score and alert_level as extra features.",
     )
+    parser.add_argument(
+        "--feature-set",
+        choices=["all", "facial", "signals"],
+        default="all",
+        help=(
+            "'all' uses EAR, MAR, pitch, yaw, roll. "
+            "'facial' uses only EAR and MAR. "
+            "'signals' uses eye/yawn/head signals and can include crop datasets."
+        ),
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    df, feature_columns = load_dataset(args.csv, args.include_rule_features)
+    df, feature_columns = load_dataset(args.csv, args.include_rule_features, args.feature_set)
     train_and_evaluate(df, feature_columns, args)
 
 

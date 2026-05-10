@@ -2,6 +2,8 @@ from pathlib import Path
 
 
 MODEL_PATH = Path("models/face_landmarker.task")
+ML_MODEL_PATH = Path("models/best_model.joblib")
+ML_DROWSY_PROBABILITY_THRESHOLD = 0.50
 
 CAMERA_INDEX = 0
 PREFERRED_CAMERA_WIDTH = 1280

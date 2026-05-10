@@ -38,7 +38,11 @@ from landmark_indexes import (
     RIGHT_EAR_POINTS,
     RIGHT_EYE_POINTS,
 )
+from ml_predictor import load_ml_model, predict_drowsiness
 from telemetry_store import reset_telemetry, update_telemetry
+
+
+ABNORMAL_HEAD_STATUSES = {"Head down", "Looking sideways", "Head tilted"}
 
 
 def open_camera():
@@ -115,6 +119,7 @@ def draw_metrics(
     drowsiness_score,
     alert_text,
     alert_color,
+    ml_result,
 ):
     draw_text(frame, f"EAR: {average_ear:.2f}", (20, 70), (255, 255, 255))
     draw_text(frame, eye_status, (20, 105), eye_status_color)
@@ -136,6 +141,21 @@ def draw_metrics(
     draw_text(frame, f"Signs: {len(warning_signs)}", (20, 325), driver_status_color)
     draw_text(frame, f"Score: {drowsiness_score}/100", (20, 370), alert_color, scale=0.9)
     draw_text(frame, alert_text, (20, 410), alert_color, scale=0.9)
+    draw_text(
+        frame,
+        format_ml_overlay(ml_result),
+        (20, 450),
+        (255, 255, 255),
+        scale=0.8,
+    )
+
+
+def format_ml_overlay(ml_result):
+    if ml_result["ml_drowsy_probability"] is None:
+        return "ML: unavailable"
+
+    live_percent = ml_result["ml_drowsy_probability"] * 100
+    return f"ML: {ml_result['ml_prediction']} D {live_percent:.0f}%"
 
 
 def calculate_average_ear(frame, face_landmarks):
@@ -195,6 +215,7 @@ def process_face(
     ear_threshold,
     session_start_time,
     last_telemetry_sample_time,
+    ml_model,
 ):
     draw_feature_points(frame, face_landmarks)
 
@@ -227,6 +248,31 @@ def process_face(
     )
     drowsiness_score = calculate_drowsiness_score(eye_status, mouth_status, head_status)
     alert_text, alert_color, alert_level = get_alert_level(drowsiness_score)
+    pitch, yaw, roll = head_pose if head_pose is not None else (None, None, None)
+    ml_result = predict_drowsiness(
+        ml_model,
+        {
+            "ear": average_ear,
+            "mar": mar,
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll": roll,
+            "score": drowsiness_score,
+            "alert_level": alert_level,
+            "eye_closed_signal": 1.0 if eye_status != "Eyes open" else 0.0,
+            "yawn_signal": 1.0 if mouth_status == "Yawning detected" else 0.0,
+            "head_abnormal_signal": 1.0 if head_status in ABNORMAL_HEAD_STATUSES else 0.0,
+        },
+        {
+            "ear_threshold": ear_threshold,
+            "mar_threshold": YAWN_MAR_THRESHOLD,
+            "eye_status": eye_status,
+            "mouth_status": mouth_status,
+            "head_status": head_status,
+            "driver_status": driver_status,
+            "score": drowsiness_score,
+        },
+    )
     last_sound_time = play_alert_sound(alert_level, last_sound_time)
 
     draw_metrics(
@@ -246,18 +292,18 @@ def process_face(
         drowsiness_score,
         alert_text,
         alert_color,
+        ml_result,
     )
-    draw_text(frame, f"EAR threshold: {ear_threshold:.2f}", (20, 450), (255, 255, 255), scale=0.7)
+    draw_text(frame, f"EAR threshold: {ear_threshold:.2f}", (20, 485), (255, 255, 255), scale=0.7)
     if open_eye_reference is not None:
         draw_text(
             frame,
             f"Open-eye ref: {open_eye_reference:.2f}",
-            (20, 480),
+            (20, 515),
             (255, 255, 255),
             scale=0.7,
         )
 
-    pitch, yaw, roll = head_pose if head_pose is not None else (None, None, None)
     elapsed = time.time() - session_start_time
     should_sample = elapsed - last_telemetry_sample_time >= TELEMETRY_SAMPLE_SECONDS
     if should_sample:
@@ -283,6 +329,7 @@ def process_face(
             "eye_status": eye_status,
             "mouth_status": mouth_status,
             "head_status": head_status,
+            **ml_result,
         },
         should_sample,
     )
@@ -303,7 +350,12 @@ def main():
 
     print_camera_resolution(cap)
     landmarker = create_face_landmarker()
+    ml_model = load_ml_model()
     print("SafeDrive AI started. Press Q or Esc to exit.")
+    if ml_model is None:
+        print("ML model unavailable.")
+    else:
+        print(f"ML model loaded: {ml_model['model_name']}")
     reset_telemetry()
 
     closed_start_time = None
@@ -347,6 +399,7 @@ def main():
                 ear_threshold,
                 session_start_time,
                 last_telemetry_sample_time,
+                ml_model,
             )
         else:
             draw_text(frame, "No face detected", (20, 35), (0, 0, 255))
@@ -376,6 +429,16 @@ def main():
                     "eye_status": "Unavailable",
                     "mouth_status": "Unavailable",
                     "head_status": "Unavailable",
+                    "ml_model_name": ml_model["model_name"] if ml_model else None,
+                    "ml_prediction": "Unavailable",
+                    "ml_confidence": None,
+                    "ml_drowsy_probability": None,
+                    "ml_calibrated_drowsy_probability": None,
+                    "ml_raw_drowsy_probability": None,
+                    "ml_alert_probability": None,
+                    "ml_raw_alert_probability": None,
+                    "ml_live_evidence": None,
+                    "ml_drowsy_threshold": None,
                 },
                 should_sample,
             )
