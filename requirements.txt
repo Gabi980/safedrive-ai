@@ -1,0 +1,12 @@
+altair==6.1.0
+av==16.1.0
+joblib==1.5.3
+mediapipe==0.10.35
+numpy==2.4.4
+opencv-python==4.13.0.92
+pandas==3.0.2
+PySide6==6.11.1
+scikit-learn==1.8.0
+streamlit==1.57.0
+streamlit-webrtc==0.65.4
+tornado==6.5.5

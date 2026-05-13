@@ -11,7 +11,12 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from alert_system import calculate_drowsiness_score, get_alert_level
-from config import EYE_CLOSED_EAR_THRESHOLD, MODEL_PATH, YAWN_MAR_THRESHOLD
+from config import (
+    EYE_CLOSED_EAR_THRESHOLD,
+    HEAVY_EYE_EAR_RATIO,
+    MODEL_PATH,
+    YAWN_MAR_THRESHOLD,
+)
 from facial_features import calculate_ear, calculate_mar, get_mouth_status
 from head_pose import estimate_head_pose, get_head_status
 from landmark_indexes import LEFT_EAR_POINTS, MOUTH_MAR_POINTS, RIGHT_EAR_POINTS
@@ -109,8 +114,11 @@ def calculate_average_ear(frame, landmarks):
 
 
 def get_static_eye_status(ear):
-    if ear >= EYE_CLOSED_EAR_THRESHOLD:
+    if ear >= EYE_CLOSED_EAR_THRESHOLD * HEAVY_EYE_EAR_RATIO:
         return "Eyes open"
+
+    if ear >= EYE_CLOSED_EAR_THRESHOLD:
+        return "Eyes heavy"
 
     return "Eyes closed"
 

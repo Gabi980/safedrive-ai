@@ -3,6 +3,8 @@ import time
 from config import (
     DROWSINESS_SECONDS_THRESHOLD,
     EYE_CLOSED_EAR_THRESHOLD,
+    HEAVY_EYE_EAR_RATIO,
+    HEAVY_EYE_SECONDS_THRESHOLD,
     YAWN_MAR_THRESHOLD,
 )
 
@@ -53,22 +55,41 @@ def calculate_mar(frame, landmarks, mouth_points):
     return (vertical_distance_1 + vertical_distance_2) / (2.0 * horizontal_distance)
 
 
-def get_eye_status(average_ear, closed_start_time, ear_threshold=None):
+def get_eye_status(
+    average_ear,
+    closed_start_time,
+    ear_threshold=None,
+    heavy_start_time=None,
+):
     if ear_threshold is None:
         ear_threshold = EYE_CLOSED_EAR_THRESHOLD
 
+    heavy_eye_threshold = ear_threshold * HEAVY_EYE_EAR_RATIO
+    current_time = time.time()
+
+    if average_ear >= heavy_eye_threshold:
+        return "Eyes open", (0, 255, 0), None, None
+
     if average_ear >= ear_threshold:
-        return "Eyes open", (0, 255, 0), None
+        if heavy_start_time is None:
+            heavy_start_time = current_time
 
+        heavy_seconds = current_time - heavy_start_time
+        if heavy_seconds >= HEAVY_EYE_SECONDS_THRESHOLD:
+            return "Eyes heavy", (0, 165, 255), None, heavy_start_time
+
+        return "Eyes open", (0, 255, 0), None, heavy_start_time
+
+    heavy_start_time = None
     if closed_start_time is None:
-        closed_start_time = time.time()
+        closed_start_time = current_time
 
-    closed_seconds = time.time() - closed_start_time
+    closed_seconds = current_time - closed_start_time
 
     if closed_seconds >= DROWSINESS_SECONDS_THRESHOLD:
-        return "Drowsiness warning", (0, 0, 255), closed_start_time
+        return "Drowsiness warning", (0, 0, 255), closed_start_time, heavy_start_time
 
-    return "Eyes closed", (0, 165, 255), closed_start_time
+    return "Eyes closed", (0, 165, 255), closed_start_time, heavy_start_time
 
 
 def get_mouth_status(mar):
