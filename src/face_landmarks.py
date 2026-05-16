@@ -65,13 +65,13 @@ def get_temporal_alert_level(fatigue_sign_ids):
         return 3
 
     if SLOW_BLINKING in fatigue_sign_ids:
-        return 2
+        return 1
 
     if FREQUENT_YAWNING in fatigue_sign_ids:
         return 2
 
     if HEAD_DOWN in fatigue_sign_ids or PROLONGED_SIDE_LOOK in fatigue_sign_ids:
-        return 2
+        return 1
 
     if UNSTABLE_HEAD_POSE in fatigue_sign_ids:
         return 1
@@ -289,6 +289,17 @@ def process_face(
         ear_threshold,
         heavy_start_time,
     )
+    current_time = time.time()
+    current_eye_closed_seconds = (
+        current_time - closed_start_time
+        if closed_start_time is not None and eye_status in {"Eyes closed", "Drowsiness warning"}
+        else 0.0
+    )
+    current_heavy_eye_seconds = (
+        current_time - heavy_start_time
+        if heavy_start_time is not None and eye_status == "Eyes heavy"
+        else 0.0
+    )
 
     mar = calculate_mar(frame, face_landmarks, MOUTH_MAR_POINTS)
     mouth_status, mouth_status_color = get_mouth_status(mar)
@@ -345,11 +356,16 @@ def process_face(
         instant_fatigue_sign_ids,
         temporal_fatigue_sign_ids,
     )
+    scoring_features = {
+        **temporal_features,
+        "current_eye_closed_seconds": current_eye_closed_seconds,
+        "current_heavy_eye_seconds": current_heavy_eye_seconds,
+    }
     drowsiness_score, rule_warning_signs = calculate_rule_based_score(
         eye_status,
         mouth_status,
         head_status,
-        temporal_features,
+        scoring_features,
         fatigue_sign_ids,
     )
     driver_status, driver_status_color, warning_signs = get_rule_based_driver_status(
@@ -371,6 +387,8 @@ def process_face(
             "roll": roll,
             "score": drowsiness_score,
             "alert_level": alert_level,
+            "current_eye_closed_seconds": current_eye_closed_seconds,
+            "current_heavy_eye_seconds": current_heavy_eye_seconds,
             "eye_closed_signal": 1.0 if eye_status != "Eyes open" else 0.0,
             "yawn_signal": 1.0 if mouth_status == "Yawning detected" else 0.0,
             "head_abnormal_signal": (
@@ -391,6 +409,8 @@ def process_face(
             "head_status": head_status,
             "driver_status": driver_status,
             "score": drowsiness_score,
+            "current_eye_closed_seconds": current_eye_closed_seconds,
+            "current_heavy_eye_seconds": current_heavy_eye_seconds,
         },
     )
     ml_result.update(
@@ -450,6 +470,8 @@ def process_face(
             "rule_based_score": drowsiness_score,
             "rule_based_status": driver_status,
             "rule_based_reasons": rule_warning_signs,
+            "current_eye_closed_seconds": current_eye_closed_seconds,
+            "current_heavy_eye_seconds": current_heavy_eye_seconds,
             "alert_level": final_alert_level,
             "warning_signs": len(rule_warning_signs),
             "driver_status": driver_status,

@@ -3,6 +3,9 @@ import pandas as pd
 
 from config import (
     BLINK_RATE_MIN_OBSERVATION_SECONDS,
+    DROWSINESS_SECONDS_THRESHOLD,
+    EYE_CLOSURE_CRITICAL_SECONDS,
+    EYE_CLOSURE_HIGH_RISK_SECONDS,
     FREQUENT_BLINKS_PER_MINUTE_THRESHOLD,
     FREQUENT_YAWN_COUNT_THRESHOLD,
     HEAD_POSE_INSTABILITY_THRESHOLD,
@@ -10,10 +13,15 @@ from config import (
     MICROSLEEP_SECONDS_THRESHOLD,
     ML_DROWSY_PROBABILITY_THRESHOLD,
     ML_MODEL_PATH,
+    NORMAL_BLINK_GRACE_SECONDS,
+    NORMAL_BLINK_RISK_CAP,
+    PERCLOS_HIGH_PERCENT,
     PROLONGED_HEAD_DOWN_SECONDS,
     PROLONGED_SIDE_LOOK_SECONDS,
+    SHORT_EYE_CLOSURE_RISK_CAP,
     SLOW_BLINK_COUNT_THRESHOLD,
     SLOW_BLINK_SECONDS_THRESHOLD,
+    TEMPORAL_SCORING_MIN_SECONDS,
     YAWN_MAR_THRESHOLD,
 )
 
@@ -30,6 +38,14 @@ def number_or_none(value):
         return None
 
     return float(value)
+
+
+def first_number_or_none(*values):
+    for value in values:
+        if value is not None:
+            return float(value)
+
+    return None
 
 
 def unavailable_result(model_name=None):
@@ -68,6 +84,20 @@ def calculate_live_evidence(feature_values, live_context):
     head_status = live_context.get("head_status")
     driver_status = live_context.get("driver_status")
     score = live_context.get("score", 0) or 0
+    current_eye_closed_seconds = number_or_none(
+        feature_values.get(
+            "current_eye_closed_seconds",
+            live_context.get("current_eye_closed_seconds"),
+        )
+    )
+    current_heavy_eye_seconds = number_or_none(
+        feature_values.get(
+            "current_heavy_eye_seconds",
+            live_context.get("current_heavy_eye_seconds"),
+        )
+    )
+    current_eye_closed_seconds = current_eye_closed_seconds or 0.0
+    current_heavy_eye_seconds = current_heavy_eye_seconds or 0.0
 
     eye_evidence = 0.0
     if ear is not None and ear_threshold:
@@ -75,14 +105,34 @@ def calculate_live_evidence(feature_values, live_context):
         eye_evidence = clamp(eye_drop)
 
     if eye_status == "Eyes heavy":
-        eye_evidence = max(eye_evidence, 0.20)
+        if current_heavy_eye_seconds >= EYE_CLOSURE_HIGH_RISK_SECONDS:
+            eye_evidence = max(eye_evidence, 0.45)
+        elif current_heavy_eye_seconds >= DROWSINESS_SECONDS_THRESHOLD:
+            eye_evidence = max(eye_evidence, 0.34)
+        else:
+            eye_evidence = max(eye_evidence, 0.20)
     elif eye_status == "Eyes closed":
-        eye_evidence = 0.35
+        if current_eye_closed_seconds >= DROWSINESS_SECONDS_THRESHOLD:
+            eye_evidence = max(eye_evidence, 0.52)
+        else:
+            eye_evidence = max(eye_evidence, 0.35)
     elif eye_status == "Drowsiness warning":
-        eye_evidence = max(eye_evidence, 0.92)
+        if current_eye_closed_seconds >= EYE_CLOSURE_CRITICAL_SECONDS:
+            eye_evidence = max(eye_evidence, 0.92)
+        elif current_eye_closed_seconds >= EYE_CLOSURE_HIGH_RISK_SECONDS:
+            eye_evidence = max(eye_evidence, 0.74)
+        else:
+            eye_evidence = max(eye_evidence, 0.58)
 
     face_visible_duration = number_or_none(
         feature_values.get("temporal_60s_face_visible_duration")
+    )
+    temporal_ready = (
+        face_visible_duration is not None
+        and face_visible_duration >= TEMPORAL_SCORING_MIN_SECONDS
+    )
+    perclos_percent = number_or_none(
+        feature_values.get("temporal_30s_perclos_percent")
     )
     blink_rate = number_or_none(feature_values.get("temporal_60s_blink_rate_per_minute"))
     avg_blink_duration = number_or_none(
@@ -94,25 +144,37 @@ def calculate_live_evidence(feature_values, live_context):
     slow_blink_count = number_or_none(feature_values.get("temporal_60s_slow_blink_count"))
     microsleep_active = bool(feature_values.get("temporal_60s_microsleep_active"))
     microsleep_recent = bool(feature_values.get("temporal_60s_microsleep_recent"))
+    seconds_since_last_microsleep = first_number_or_none(
+        feature_values.get("seconds_since_last_microsleep"),
+        feature_values.get("temporal_60s_seconds_since_last_microsleep"),
+    )
 
     if microsleep_active or microsleep_recent:
-        eye_evidence = max(eye_evidence, 0.95)
+        if current_eye_closed_seconds >= EYE_CLOSURE_CRITICAL_SECONDS:
+            eye_evidence = max(eye_evidence, 0.95)
+        elif current_eye_closed_seconds >= EYE_CLOSURE_HIGH_RISK_SECONDS:
+            eye_evidence = max(eye_evidence, 0.78)
+        else:
+            eye_evidence = max(eye_evidence, 0.62)
     elif (
-        (
-            slow_blink_count is not None
-            and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
-        )
-        or (
-            avg_blink_duration is not None
-            and avg_blink_duration >= SLOW_BLINK_SECONDS_THRESHOLD
-            and slow_blink_count is not None
-            and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
-        )
-        or (
-            longest_eye_closure is not None
-            and longest_eye_closure >= SLOW_BLINK_SECONDS_THRESHOLD
-            and slow_blink_count is not None
-            and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+        temporal_ready
+        and (
+            (
+                slow_blink_count is not None
+                and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+            )
+            or (
+                avg_blink_duration is not None
+                and avg_blink_duration >= SLOW_BLINK_SECONDS_THRESHOLD
+                and slow_blink_count is not None
+                and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+            )
+            or (
+                longest_eye_closure is not None
+                and longest_eye_closure >= SLOW_BLINK_SECONDS_THRESHOLD
+                and slow_blink_count is not None
+                and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+            )
         )
     ):
         eye_evidence = max(eye_evidence, 0.45)
@@ -132,9 +194,9 @@ def calculate_live_evidence(feature_values, live_context):
         mouth_evidence = clamp((mar - mouth_start) / mouth_range)
 
     if mouth_status == "Yawning detected":
-        mouth_evidence = max(mouth_evidence, 0.55)
+        mouth_evidence = max(min(mouth_evidence, 0.45), 0.35)
     else:
-        mouth_evidence = min(mouth_evidence, 0.25)
+        mouth_evidence = min(mouth_evidence, 0.20)
 
     yawn_count_60s = number_or_none(feature_values.get("yawn_count_60s"))
     yawn_count_120s = number_or_none(feature_values.get("yawn_count_120s"))
@@ -161,11 +223,11 @@ def calculate_live_evidence(feature_values, live_context):
     ):
         mouth_evidence = max(mouth_evidence, 0.20)
 
-    head_down_duration = number_or_none(
-        feature_values.get("temporal_30s_head_down_duration")
+    longest_head_down_duration = number_or_none(
+        feature_values.get("temporal_30s_longest_head_down_duration")
     )
-    side_look_duration = number_or_none(
-        feature_values.get("temporal_30s_side_look_duration")
+    longest_side_look_duration = number_or_none(
+        feature_values.get("temporal_30s_longest_side_look_duration")
     )
     head_pose_instability = number_or_none(
         feature_values.get("temporal_30s_head_pose_instability")
@@ -173,14 +235,14 @@ def calculate_live_evidence(feature_values, live_context):
 
     head_evidence = 0.0
     if (
-        head_down_duration is not None
-        and head_down_duration >= PROLONGED_HEAD_DOWN_SECONDS
+        longest_head_down_duration is not None
+        and longest_head_down_duration >= PROLONGED_HEAD_DOWN_SECONDS
     ):
         head_evidence = max(head_evidence, 0.55)
 
     if (
-        side_look_duration is not None
-        and side_look_duration >= PROLONGED_SIDE_LOOK_SECONDS
+        longest_side_look_duration is not None
+        and longest_side_look_duration >= PROLONGED_SIDE_LOOK_SECONDS
     ):
         head_evidence = max(head_evidence, 0.45)
 
@@ -194,20 +256,63 @@ def calculate_live_evidence(feature_values, live_context):
         head_evidence = 0.10
 
     status_evidence = 0.0
-    if driver_status == "Driver drowsy":
-        status_evidence = 0.90
-    elif isinstance(driver_status, str) and driver_status.startswith("Warning:"):
+    if driver_status == "Driver critically drowsy":
+        status_evidence = 0.85
+    elif driver_status == "Driver drowsy":
+        status_evidence = 0.60
+    elif driver_status == "Driver attention required":
         status_evidence = 0.35
 
     score_evidence = clamp(score / 100.0)
+    has_recent_microsleep = (
+        seconds_since_last_microsleep is not None
+        and seconds_since_last_microsleep <= 8.0
+    )
+    has_recent_yawn = (
+        seconds_since_last_yawn is not None
+        and seconds_since_last_yawn <= 8.0
+    )
 
-    return max(
+    evidence = max(
         eye_evidence,
         mouth_evidence,
         head_evidence,
         status_evidence,
         score_evidence,
     )
+    is_instant_neutral = (
+        eye_status == "Eyes open"
+        and mouth_status == "Mouth normal"
+        and head_status == "Head normal"
+    )
+    has_repeated_yawns = (
+        (yawn_count_120s is not None and yawn_count_120s >= FREQUENT_YAWN_COUNT_THRESHOLD)
+        or (yawn_count_60s is not None and yawn_count_60s >= 2)
+    )
+    has_strong_temporal_eye_signal = (
+        (perclos_percent is not None and perclos_percent >= PERCLOS_HIGH_PERCENT)
+        and slow_blink_count is not None
+        and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+    )
+
+    if is_instant_neutral and not (
+        microsleep_active
+        or microsleep_recent
+        or has_recent_microsleep
+        or has_recent_yawn
+        or has_repeated_yawns
+        or has_strong_temporal_eye_signal
+    ):
+        evidence = min(evidence, 0.20)
+    elif is_instant_neutral:
+        if has_recent_microsleep:
+            evidence = min(evidence, 0.45)
+        elif has_repeated_yawns:
+            evidence = min(evidence, 0.50)
+        else:
+            evidence = min(evidence, 0.35)
+
+    return evidence
 
 
 def calibrate_live_probability(raw_drowsy_probability, live_evidence):
@@ -215,18 +320,131 @@ def calibrate_live_probability(raw_drowsy_probability, live_evidence):
         return raw_drowsy_probability
 
     if live_evidence < 0.15:
-        return min(raw_drowsy_probability, 0.25)
+        return min(raw_drowsy_probability, 0.18)
 
-    if live_evidence < 0.40:
-        calibrated = (raw_drowsy_probability * 0.55) + (live_evidence * 0.45)
-        return min(calibrated, 0.45)
+    if live_evidence < 0.35:
+        calibrated = (raw_drowsy_probability * 0.30) + (live_evidence * 0.70)
+        return min(calibrated, 0.32)
+
+    if live_evidence < 0.55:
+        calibrated = (raw_drowsy_probability * 0.35) + (live_evidence * 0.65)
+        return min(calibrated, 0.48)
 
     if live_evidence < 0.75:
-        calibrated = (raw_drowsy_probability * 0.45) + (live_evidence * 0.55)
-        return min(calibrated, 0.70)
+        calibrated = (raw_drowsy_probability * 0.40) + (live_evidence * 0.60)
+        return min(calibrated, 0.65)
 
     calibrated = (raw_drowsy_probability * 0.35) + (live_evidence * 0.65)
+    if live_evidence >= 0.90:
+        return max(clamp(calibrated), 0.85)
+
     return clamp(calibrated)
+
+
+def get_neutral_recovery_cap(feature_values, live_context):
+    if not live_context:
+        return None
+
+    is_currently_neutral = (
+        live_context.get("eye_status") == "Eyes open"
+        and live_context.get("mouth_status") == "Mouth normal"
+        and live_context.get("head_status") == "Head normal"
+    )
+    if not is_currently_neutral:
+        return None
+
+    seconds_since_last_microsleep = first_number_or_none(
+        feature_values.get("seconds_since_last_microsleep"),
+        feature_values.get("temporal_60s_seconds_since_last_microsleep"),
+    )
+    seconds_since_last_yawn = number_or_none(
+        feature_values.get("seconds_since_last_yawn")
+    )
+    yawn_count_60s = number_or_none(feature_values.get("yawn_count_60s"))
+    yawn_count_120s = number_or_none(feature_values.get("yawn_count_120s"))
+    perclos_percent = number_or_none(
+        feature_values.get("temporal_30s_perclos_percent")
+    )
+    slow_blink_count = number_or_none(
+        feature_values.get("temporal_60s_slow_blink_count")
+    )
+
+    has_repeated_yawns = (
+        (yawn_count_120s is not None and yawn_count_120s >= FREQUENT_YAWN_COUNT_THRESHOLD)
+        or (yawn_count_60s is not None and yawn_count_60s >= 2)
+    )
+    if has_repeated_yawns:
+        return 0.50
+
+    if seconds_since_last_yawn is not None and seconds_since_last_yawn <= 8.0:
+        return 0.35
+
+    if seconds_since_last_microsleep is not None:
+        if seconds_since_last_microsleep <= 3.0:
+            return 0.60
+        if seconds_since_last_microsleep <= 8.0:
+            return 0.45
+        if seconds_since_last_microsleep <= 15.0:
+            return 0.35
+
+    has_stale_temporal_eye_signal = (
+        perclos_percent is not None
+        and perclos_percent >= PERCLOS_HIGH_PERCENT
+        and slow_blink_count is not None
+        and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+    )
+    if has_stale_temporal_eye_signal:
+        return 0.35
+
+    return 0.28
+
+
+def get_transient_eye_closure_cap(feature_values, live_context):
+    if not live_context:
+        return None
+
+    eye_status = live_context.get("eye_status")
+    if eye_status not in {"Eyes heavy", "Eyes closed", "Drowsiness warning"}:
+        return None
+
+    current_heavy_eye_seconds = number_or_none(
+        feature_values.get(
+            "current_heavy_eye_seconds",
+            live_context.get("current_heavy_eye_seconds"),
+        )
+    )
+    if eye_status == "Eyes heavy":
+        current_heavy_eye_seconds = current_heavy_eye_seconds or 0.0
+        if current_heavy_eye_seconds < DROWSINESS_SECONDS_THRESHOLD:
+            return 0.35
+        if current_heavy_eye_seconds < EYE_CLOSURE_HIGH_RISK_SECONDS:
+            return 0.50
+        if current_heavy_eye_seconds < EYE_CLOSURE_CRITICAL_SECONDS:
+            return 0.65
+        return None
+
+    current_eye_closed_seconds = number_or_none(
+        feature_values.get(
+            "current_eye_closed_seconds",
+            live_context.get("current_eye_closed_seconds"),
+        )
+    )
+    if current_eye_closed_seconds is None:
+        return None
+
+    if current_eye_closed_seconds <= NORMAL_BLINK_GRACE_SECONDS:
+        return NORMAL_BLINK_RISK_CAP
+
+    if current_eye_closed_seconds < DROWSINESS_SECONDS_THRESHOLD:
+        return SHORT_EYE_CLOSURE_RISK_CAP
+
+    if current_eye_closed_seconds < EYE_CLOSURE_HIGH_RISK_SECONDS:
+        return 0.60
+
+    if current_eye_closed_seconds < EYE_CLOSURE_CRITICAL_SECONDS:
+        return 0.78
+
+    return None
 
 
 def predict_drowsiness(model_bundle, feature_values, live_context=None):
@@ -251,6 +469,13 @@ def predict_drowsiness(model_bundle, feature_values, live_context=None):
         raw_drowsy_probability,
         live_evidence,
     )
+    transient_cap = get_transient_eye_closure_cap(feature_values, live_context)
+    if transient_cap is not None:
+        drowsy_probability = min(drowsy_probability, transient_cap)
+    neutral_recovery_cap = get_neutral_recovery_cap(feature_values, live_context)
+    if neutral_recovery_cap is not None:
+        drowsy_probability = min(drowsy_probability, neutral_recovery_cap)
+
     prediction_index = 1 if drowsy_probability >= ML_DROWSY_PROBABILITY_THRESHOLD else 0
     alert_probability = 1.0 - drowsy_probability
     raw_alert_probability = (

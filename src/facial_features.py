@@ -2,6 +2,7 @@ import time
 
 from config import (
     DROWSINESS_SECONDS_THRESHOLD,
+    EYE_CLOSED_CONFIRMATION_RATIO,
     EYE_CLOSED_EAR_THRESHOLD,
     HEAVY_EYE_EAR_RATIO,
     HEAVY_EYE_SECONDS_THRESHOLD,
@@ -65,12 +66,13 @@ def get_eye_status(
         ear_threshold = EYE_CLOSED_EAR_THRESHOLD
 
     heavy_eye_threshold = ear_threshold * HEAVY_EYE_EAR_RATIO
+    closed_eye_threshold = ear_threshold * EYE_CLOSED_CONFIRMATION_RATIO
     current_time = time.time()
 
     if average_ear >= heavy_eye_threshold:
         return "Eyes open", (0, 255, 0), None, None
 
-    if average_ear >= ear_threshold:
+    if average_ear >= closed_eye_threshold:
         if heavy_start_time is None:
             heavy_start_time = current_time
 

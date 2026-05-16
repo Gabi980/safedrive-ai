@@ -17,7 +17,7 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -28,11 +28,66 @@ BASE_FEATURE_COLUMNS = ["ear", "mar", "pitch", "yaw", "roll"]
 FACIAL_FEATURE_COLUMNS = ["ear", "mar"]
 SIGNAL_FEATURE_COLUMNS = ["eye_closed_signal", "yawn_signal", "head_abnormal_signal"]
 RULE_FEATURE_COLUMNS = ["score", "alert_level"]
+TEMPORAL_FEATURE_COLUMNS = [
+    "ear",
+    "mar",
+    "pitch",
+    "yaw",
+    "roll",
+    "temporal_10s_perclos_percent",
+    "temporal_10s_closed_eye_ratio",
+    "temporal_10s_heavy_eye_ratio",
+    "temporal_10s_blink_rate_per_minute",
+    "temporal_10s_avg_blink_duration",
+    "temporal_10s_longest_eye_closure",
+    "temporal_10s_slow_blink_count",
+    "temporal_30s_perclos_percent",
+    "temporal_30s_closed_eye_ratio",
+    "temporal_30s_heavy_eye_ratio",
+    "temporal_30s_blink_rate_per_minute",
+    "temporal_30s_avg_blink_duration",
+    "temporal_30s_longest_eye_closure",
+    "temporal_30s_slow_blink_count",
+    "temporal_30s_head_down_duration",
+    "temporal_30s_side_look_duration",
+    "temporal_30s_head_abnormal_duration",
+    "temporal_30s_longest_head_down_duration",
+    "temporal_30s_longest_side_look_duration",
+    "temporal_30s_head_pose_instability",
+    "temporal_60s_perclos_percent",
+    "temporal_60s_closed_eye_ratio",
+    "temporal_60s_heavy_eye_ratio",
+    "temporal_60s_blink_count",
+    "temporal_60s_blink_rate_per_minute",
+    "temporal_60s_avg_blink_duration",
+    "temporal_60s_longest_eye_closure",
+    "temporal_60s_slow_blink_count",
+    "temporal_60s_microsleep_event_count",
+    "temporal_60s_microsleep_active",
+    "temporal_60s_microsleep_recent",
+    "temporal_60s_head_down_duration",
+    "temporal_60s_side_look_duration",
+    "temporal_60s_head_abnormal_duration",
+    "temporal_60s_longest_head_down_duration",
+    "temporal_60s_longest_side_look_duration",
+    "temporal_60s_head_pose_instability",
+    "yawn_count_60s",
+    "yawn_count_120s",
+    "avg_yawn_duration_60s",
+    "avg_yawn_duration_120s",
+    "max_yawn_duration",
+    "long_yawn_count",
+]
 TARGET_COLUMN = "label"
 LABEL_NAMES = ["alert", "drowsy"]
 
 
-def load_dataset(csv_path, include_rule_features=False, feature_set="all"):
+def load_dataset(
+    csv_path,
+    include_rule_features=False,
+    feature_set="all",
+    sample_weight_column=None,
+):
     df = pd.read_csv(csv_path, low_memory=False)
     feature_columns = get_feature_columns(include_rule_features, feature_set)
 
@@ -48,6 +103,11 @@ def load_dataset(csv_path, include_rule_features=False, feature_set="all"):
     if missing_columns:
         raise ValueError(f"Missing columns in {csv_path}: {missing_columns}")
 
+    if sample_weight_column and sample_weight_column not in df.columns:
+        raise ValueError(
+            f"Missing sample weight column in {csv_path}: {sample_weight_column}"
+        )
+
     before_rows = len(df)
     if feature_set == "signals":
         df = df[to_bool(df["usable_for_training"])].copy()
@@ -56,6 +116,11 @@ def load_dataset(csv_path, include_rule_features=False, feature_set="all"):
 
     df = df.dropna(subset=feature_columns + [TARGET_COLUMN])
     df[TARGET_COLUMN] = df[TARGET_COLUMN].astype(int)
+    if sample_weight_column:
+        df[sample_weight_column] = pd.to_numeric(
+            df[sample_weight_column],
+            errors="coerce",
+        ).fillna(1.0)
 
     print(f"Loaded: {csv_path}")
     print(f"Rows before cleaning: {before_rows}")
@@ -75,6 +140,8 @@ def get_feature_columns(include_rule_features=False, feature_set="all"):
         feature_columns = FACIAL_FEATURE_COLUMNS.copy()
     elif feature_set == "signals":
         feature_columns = SIGNAL_FEATURE_COLUMNS.copy()
+    elif feature_set == "temporal":
+        feature_columns = TEMPORAL_FEATURE_COLUMNS.copy()
     elif feature_set == "all":
         feature_columns = BASE_FEATURE_COLUMNS.copy()
     else:
@@ -86,17 +153,55 @@ def get_feature_columns(include_rule_features=False, feature_set="all"):
     return feature_columns
 
 
-def split_dataset(df, feature_columns, test_size, random_state):
+def split_dataset(
+    df,
+    feature_columns,
+    test_size,
+    random_state,
+    group_column=None,
+    sample_weight_column=None,
+):
     x = df[feature_columns]
     y = df[TARGET_COLUMN]
+    sample_weights = None
+    if sample_weight_column:
+        sample_weights = df[sample_weight_column]
 
-    return train_test_split(
-        x,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=y,
-    )
+    if group_column and group_column in df.columns:
+        groups = df[group_column].astype(str)
+        splitter = GroupShuffleSplit(
+            n_splits=1,
+            test_size=test_size,
+            random_state=random_state,
+        )
+        train_index, test_index = next(splitter.split(x, y, groups))
+        return (
+            x.iloc[train_index],
+            x.iloc[test_index],
+            y.iloc[train_index],
+            y.iloc[test_index],
+            sample_weights.iloc[train_index] if sample_weights is not None else None,
+            sample_weights.iloc[test_index] if sample_weights is not None else None,
+        )
+
+    if sample_weights is not None:
+        return train_test_split(
+            x,
+            y,
+            sample_weights,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y,
+        )
+
+    x_train, x_test, y_train, y_test = train_test_split(
+            x,
+            y,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y,
+        )
+    return x_train, x_test, y_train, y_test, None, None
 
 
 def build_models(random_state):
@@ -185,6 +290,18 @@ def evaluate_model(name, model, x_test, y_test):
     matrix = confusion_matrix(y_test, y_pred)
 
     return metrics, report, matrix, y_prob
+
+
+def fit_model(model, x_train, y_train, sample_weight=None):
+    if sample_weight is None:
+        model.fit(x_train, y_train)
+        return
+
+    if isinstance(model, Pipeline):
+        model.fit(x_train, y_train, model__sample_weight=sample_weight)
+        return
+
+    model.fit(x_train, y_train, sample_weight=sample_weight)
 
 
 def save_confusion_matrix(matrix, model_name, output_dir):
@@ -276,11 +393,13 @@ def save_feature_importance(model, feature_columns, output_dir, model_name):
 
 
 def train_and_evaluate(df, feature_columns, args):
-    x_train, x_test, y_train, y_test = split_dataset(
+    x_train, x_test, y_train, y_test, train_weights, _ = split_dataset(
         df,
         feature_columns,
         args.test_size,
         args.random_state,
+        args.group_column,
+        args.sample_weight_column,
     )
     models = select_models(build_models(args.random_state), args.models)
     output_dir = Path(args.reports_dir)
@@ -291,6 +410,14 @@ def train_and_evaluate(df, feature_columns, args):
     print(f"Train rows: {len(x_train)}", flush=True)
     print(f"Test rows:  {len(x_test)}", flush=True)
     print(f"Features:   {feature_columns}", flush=True)
+    if args.group_column:
+        print(f"Group split: {args.group_column}", flush=True)
+    if train_weights is not None:
+        print(
+            f"Sample weights: {args.sample_weight_column} "
+            f"(train effective weight={train_weights.sum():.1f})",
+            flush=True,
+        )
     print(f"Models:     {list(models)}", flush=True)
 
     trained_models = {}
@@ -299,11 +426,14 @@ def train_and_evaluate(df, feature_columns, args):
     for name, model in models.items():
         model_x_train = x_train
         model_y_train = y_train
+        model_sample_weight = train_weights
 
         if name == "svm_rbf" and args.svm_max_train_rows > 0:
             sample_size = min(args.svm_max_train_rows, len(x_train))
             sampled = x_train.copy()
             sampled[TARGET_COLUMN] = y_train
+            if train_weights is not None:
+                sampled["_sample_weight"] = train_weights
             rows_per_class = max(1, sample_size // 2)
             sampled = sampled.groupby(TARGET_COLUMN, group_keys=False).sample(
                 n=rows_per_class,
@@ -312,6 +442,9 @@ def train_and_evaluate(df, feature_columns, args):
             )
             model_x_train = sampled[feature_columns]
             model_y_train = sampled[TARGET_COLUMN]
+            model_sample_weight = (
+                sampled["_sample_weight"] if "_sample_weight" in sampled else None
+            )
             print(
                 f"\nTraining {name} on {len(model_x_train)} sampled rows "
                 f"(use --svm-max-train-rows 0 for full SVM training)...",
@@ -322,7 +455,7 @@ def train_and_evaluate(df, feature_columns, args):
                 f"\nTraining {name} on {len(model_x_train)} rows...", flush=True)
 
         started_at = time.time()
-        model.fit(model_x_train, model_y_train)
+        fit_model(model, model_x_train, model_y_train, model_sample_weight)
         elapsed = time.time() - started_at
         print(f"{name} trained in {elapsed:.1f}s", flush=True)
         print(f"Evaluating {name}...", flush=True)
@@ -391,20 +524,36 @@ def parse_args():
     )
     parser.add_argument(
         "--feature-set",
-        choices=["all", "facial", "signals"],
+        choices=["all", "facial", "signals", "temporal"],
         default="all",
         help=(
             "'all' uses EAR, MAR, pitch, yaw, roll. "
             "'facial' uses only EAR and MAR. "
-            "'signals' uses eye/yawn/head signals and can include crop datasets."
+            "'signals' uses eye/yawn/head signals and can include crop datasets. "
+            "'temporal' uses time-window features from videos."
         ),
+    )
+    parser.add_argument(
+        "--group-column",
+        default=None,
+        help="Optional group column for leakage-safe splitting, for example video_id.",
+    )
+    parser.add_argument(
+        "--sample-weight-column",
+        default=None,
+        help="Optional numeric column used as training sample weight.",
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    df, feature_columns = load_dataset(args.csv, args.include_rule_features, args.feature_set)
+    df, feature_columns = load_dataset(
+        args.csv,
+        args.include_rule_features,
+        args.feature_set,
+        args.sample_weight_column,
+    )
     train_and_evaluate(df, feature_columns, args)
 
 

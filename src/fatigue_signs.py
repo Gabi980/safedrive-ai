@@ -14,6 +14,7 @@ from config import (
     PROLONGED_SIDE_LOOK_SECONDS,
     SLOW_BLINK_COUNT_THRESHOLD,
     SLOW_BLINK_SECONDS_THRESHOLD,
+    TEMPORAL_SCORING_MIN_SECONDS,
 )
 
 
@@ -155,7 +156,7 @@ def classify_instant_fatigue_signs(eye_status, mouth_status, head_status):
     elif eye_status == "Eyes heavy":
         signs.append(HEAVY_EYES)
     elif eye_status == "Drowsiness warning":
-        signs.append(MICROSLEEP)
+        signs.append(EYES_CLOSED)
 
     return signs
 
@@ -172,6 +173,7 @@ def classify_temporal_fatigue_signs(temporal_features, window_seconds=60):
     face_visible_duration = _number_or_zero(
         temporal_features.get(f"{prefix}_face_visible_duration")
     )
+    temporal_ready = face_visible_duration >= TEMPORAL_SCORING_MIN_SECONDS
     avg_blink_duration = _number_or_none(
         temporal_features.get(f"{prefix}_avg_blink_duration")
     )
@@ -181,22 +183,13 @@ def classify_temporal_fatigue_signs(temporal_features, window_seconds=60):
     microsleep_event_count = _number_or_zero(
         temporal_features.get(f"{prefix}_microsleep_event_count")
     )
-    longest_eye_closure = _number_or_zero(
-        temporal_features.get(f"{prefix}_longest_eye_closure")
-    )
     microsleep_active = bool(temporal_features.get(f"{prefix}_microsleep_active"))
     microsleep_recent = bool(temporal_features.get(f"{prefix}_microsleep_recent"))
     yawn_count_60s = _number_or_zero(temporal_features.get("yawn_count_60s"))
     yawn_count_120s = _number_or_zero(temporal_features.get("yawn_count_120s"))
     head_prefix = "temporal_30s"
-    head_down_duration = _number_or_zero(
-        temporal_features.get(f"{head_prefix}_head_down_duration")
-    )
     longest_head_down_duration = _number_or_zero(
         temporal_features.get(f"{head_prefix}_longest_head_down_duration")
-    )
-    side_look_duration = _number_or_zero(
-        temporal_features.get(f"{head_prefix}_side_look_duration")
     )
     longest_side_look_duration = _number_or_zero(
         temporal_features.get(f"{head_prefix}_longest_side_look_duration")
@@ -206,7 +199,8 @@ def classify_temporal_fatigue_signs(temporal_features, window_seconds=60):
     )
 
     if (
-        blink_rate is not None
+        temporal_ready
+        and blink_rate is not None
         and face_visible_duration >= BLINK_RATE_MIN_OBSERVATION_SECONDS
         and blink_rate >= FREQUENT_BLINKS_PER_MINUTE_THRESHOLD
     ):
@@ -221,12 +215,15 @@ def classify_temporal_fatigue_signs(temporal_features, window_seconds=60):
 
     slow_blinks_without_microsleep = max(0, slow_blink_count - microsleep_event_count)
     if (
-        slow_blinks_without_microsleep >= SLOW_BLINK_COUNT_THRESHOLD
-        or (
-            avg_blink_duration is not None
-            and avg_blink_duration >= SLOW_BLINK_SECONDS_THRESHOLD
-            and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
-            and not has_microsleep
+        temporal_ready
+        and (
+            slow_blinks_without_microsleep >= SLOW_BLINK_COUNT_THRESHOLD
+            or (
+                avg_blink_duration is not None
+                and avg_blink_duration >= SLOW_BLINK_SECONDS_THRESHOLD
+                and slow_blink_count >= SLOW_BLINK_COUNT_THRESHOLD
+                and not has_microsleep
+            )
         )
     ):
         signs.append(SLOW_BLINKING)
@@ -237,16 +234,10 @@ def classify_temporal_fatigue_signs(temporal_features, window_seconds=60):
     ):
         signs.append(FREQUENT_YAWNING)
 
-    if (
-        head_down_duration >= PROLONGED_HEAD_DOWN_SECONDS
-        or longest_head_down_duration >= PROLONGED_HEAD_DOWN_SECONDS
-    ):
+    if longest_head_down_duration >= PROLONGED_HEAD_DOWN_SECONDS:
         signs.append(HEAD_DOWN)
 
-    if (
-        side_look_duration >= PROLONGED_SIDE_LOOK_SECONDS
-        or longest_side_look_duration >= PROLONGED_SIDE_LOOK_SECONDS
-    ):
+    if longest_side_look_duration >= PROLONGED_SIDE_LOOK_SECONDS:
         signs.append(PROLONGED_SIDE_LOOK)
 
     if (

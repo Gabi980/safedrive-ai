@@ -117,7 +117,7 @@ def risk_profile(probability, face_detected=True):
             "color": QColor(RED),
         }
 
-    if probability >= 0.50:
+    if probability >= 0.65:
         return {
             "label": "HIGH",
             "status": "Fatigue detected",
@@ -126,7 +126,7 @@ def risk_profile(probability, face_detected=True):
             "color": QColor(YELLOW),
         }
 
-    if probability >= 0.30:
+    if probability >= 0.40:
         return {
             "label": "MODERATE",
             "status": "Attention needed",
